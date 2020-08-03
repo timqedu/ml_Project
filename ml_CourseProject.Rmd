@@ -1,0 +1,319 @@
+---
+title: "Machine Learning Project"
+author: "Tim Qiu"
+date: "02/08/2020"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Machine Learning Project
+
+## SUMMARY
+This machine learning project utilizes the [Human Activity Recognition](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har) datasets. In particular, the weightlifting subsets were used for this project. In short, many sensors placed on human participants collected data as they completed basic resistance training movements. A professional trainer rated the quality of the subjects movements. This project attempts via machine learning methods to predict the quality of movement during weightlifting by modelling the sensor data.
+
+## PREPROCESS
+
+### Load Packages
+
+```{r, message=FALSE}
+library(tidyverse)
+library(caret)
+library(skimr)
+library(Rmisc)
+library(kableExtra)
+library(rattle)
+library(rpart.plot)
+library(grid)
+library(gridExtra)
+
+##arrange df vars by position
+##'vars' must be a named vector, e.g. c("var.name"=1)
+arrange.vars <- function(data, vars){
+    ##stop if not a data.frame (but should work for matrices as well)
+    stopifnot(is.data.frame(data))
+
+    ##sort out inputs
+    data.nms <- names(data)
+    var.nr <- length(data.nms)
+    var.nms <- names(vars)
+    var.pos <- vars
+    ##sanity checks
+    stopifnot( !any(duplicated(var.nms)), 
+               !any(duplicated(var.pos)) )
+    stopifnot( is.character(var.nms), 
+               is.numeric(var.pos) )
+    stopifnot( all(var.nms %in% data.nms) )
+    stopifnot( all(var.pos > 0), 
+               all(var.pos <= var.nr) )
+
+    ##prepare output
+    out.vec <- character(var.nr)
+    out.vec[var.pos] <- var.nms
+    out.vec[-var.pos] <- data.nms[ !(data.nms %in% var.nms) ]
+    stopifnot( length(out.vec)==var.nr )
+
+    ##re-arrange vars by position
+    data <- data[ , out.vec]
+    return(data)
+}
+```
+
+### Load Data
+
+```{r}
+setwd("C:/Users/Tim/Google Drive/exc/machineLearning/ml_CourseProject")
+print(paste0("Working Directory: ", getwd()))
+
+dataTrain <- read.csv("ml_trainingData.csv")
+dataTest <- read.csv("ml_testingData.csv")
+
+# View(dataTrain)
+# View(dataTest)
+```
+
+### Clean Data  
+##### Steps in cleaning   
+1. Remove variables with near zero variance  
+2. Remove variables that contain over 95% NA values  
+3. Remove irrelevant variables upon visual inspection  
+```{r}
+idim <- dim(dataTrain) #get initial training data dimensions
+
+dataTrain <- dataTrain[,-c(1:5)]  #first 5 columns are personal useless info
+dataTest <- dataTest[,-c(1:5)]
+
+rmcol <- nearZeroVar(dataTrain)  #Remove near zero variance predictors
+dataTrain <- dataTrain[,-rmcol]
+dataTest <- dataTest[,-rmcol]
+
+rmna <- sapply(dataTrain, function(x){mean(is.na(x))}) > 0.95 #Remove columns with more than 95% NA obs 
+dataTrain <- dataTrain[, rmna == FALSE]                       #mean() CAN BE APPLIED TO BOOLEAN! 
+dataTest <- dataTest[, rmna == FALSE]
+
+fdim <- dim(dataTrain) #get final training data dimensions
+
+dataTrain$classe <- as.factor(dataTrain$classe)  #declare classe as factor
+
+dimchg <- rbind(idim, fdim) #generate table displaying change in dimensions from cleaning
+dimchg <- cbind(c("raw", "clean"), dimchg)
+dimchg <- as.data.frame(dimchg)
+kable(x = dimchg,
+      format = 'html',
+      col.names = c("change", "rows", "cols"),
+      table.attr = "style = \"color: black;\"",
+      caption = "Table 1. Dimension Changes",
+      row.names = FALSE) %>%
+  kable_styling(bootstrap_options = "basic",
+                full_width = FALSE)
+```
+
+
+### Descriptives
+Produces table with summary statistics of training data.
+```{r}
+trainskim <- skim(dataTrain) #using skimr grabs descriptive stats
+trainskim <- trainskim[, c(1:2, 8:10, 12, 14:15)]  #collect only useful columns for display
+kable(x = trainskim,
+      format = 'html',
+      digits = 2,
+      col.names = c("type", "var", "M", "SD", "0%", "median", "100%", "hist"),
+      caption = "Table 2. Descriptive Statistics of Training Set",
+      table.attr = "style = \"color: black;\"") %>%
+  kable_styling(bootstrap_options = "striped",
+                fixed_thead = TRUE,
+                full_width = FALSE)
+```
+
+
+### Partition
+
+Split Training Data into Train/Test sets for model building
+```{r}
+split <- createDataPartition(y = dataTrain$classe, p = 0.7, list = FALSE)
+trainset <- dataTrain[split,]
+testset <- dataTrain[-split,]
+```
+
+*****
+
+## TRAINING
+
+### Approach
+The following steps are used for training models.  
+1. First, we will assess using the fundamental tools of classification trees  
+2. Then, we apply enhancements, boosting and bagging and compare performance to basic models.  
+3. Finally, the best 3 predictor models will be combined and evaluated for performance.  
+  
+  
+Here are the models we will use    
+Basic:  
+1. 'rpart' - Classification and Regression Trees  
+  
+Enhancements:    
+2. 'gbm' - Gradient Boosting Model (BOOST)  
+3. 'treebag' - Bagged CARTS (BAG)  
+4. 'rf' - Random Forest  
+  
+Set seed for reproducability
+```{r}
+set.seed(42069)
+```
+
+### rpart
+Train Basic classification and Regression Tree Model
+```{r}
+mod_rpart <- train(classe ~ .,     #Train CART model 
+                  data = trainset,
+                  method = "rpart",
+                  trControl = trainControl(method ="cv", number = 5))
+```
+
+### gbm
+Train Gradient Bossted Trees Model
+```{r}
+mod_gbm <- train(classe ~.,
+                 data = trainset,
+                 method = "gbm",
+                 verbose = FALSE)
+```
+
+### treebag
+Train Bagged Trees Model
+```{r}
+mod_treebag <- train(classe ~.,
+                 data = trainset,
+                 method = "treebag")
+```
+
+### rf
+Train Random Forest Model
+```{r}
+mod_rf <- train(classe ~.,
+                data = trainset,
+                method = "rf",
+                tuneGrid = data.frame(mtry=2))
+```
+
+
+## PREDICTION
+
+### rpart
+```{r}
+pred_rpart <- predict(mod_rpart, newdata = testset)  #predict using CART
+cm_rpart <- confusionMatrix(data = pred_rpart, reference = testset$classe)  #Compute model statistics
+stat_rpart <- cm_rpart$overall[1:5]  #store relevant statistics
+```
+
+### gbm
+```{r}
+pred_gbm <- predict(mod_gbm, newdata = testset) #predict using gradient boost trees
+cm_gbm <- confusionMatrix(data = pred_gbm, reference = testset$classe) #compute model statistic
+stat_gbm <- cm_gbm$overall[1:5]
+```
+
+### treebag
+```{r}
+pred_treebag <- predict(mod_treebag, newdata = testset) #predict using bagged trees
+cm_treebag <- confusionMatrix(data = pred_treebag, reference = testset$classe) #compute model statistics
+stat_treebag <- cm_treebag$overall[1:5]
+```
+
+### rf
+```{r}
+pred_rf <- predict(mod_rf, newdata = testset) #predict using random forest model
+cm_rf <- confusionMatrix(data = pred_rf, reference = testset$classe)
+stat_rf <- cm_rf$overall[1:5]
+```
+
+## ANALYSIS
+
+### Confusion Matrix
+
+Generate confusion matrices for each model in the ggplot2 environment. Displays as grid.
+```{r}
+#Generate confusion matrix tileplots for all four models
+pcm_rpart <- ggplot(data = as.data.frame(cm_rpart$table), mapping = aes(x = Reference, y = Prediction)) + 
+  geom_tile(aes(fill = Freq), colour = "white") +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "green", high = "pink") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("CART confmat")
+
+pcm_gbm <- ggplot(data = as.data.frame(cm_gbm$table), mapping = aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "green", high = "pink") +
+  theme_bw() + theme(legend.position = "none") +
+  ggtitle("GBM confmat")
+
+pcm_treebag <- ggplot(data = as.data.frame(cm_treebag$table), mapping = aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "green", high = "pink") +
+  theme_bw() + theme(legend.position = "none") +
+  ggtitle("Treebag confmat")
+
+pcm_rf <- ggplot(data = as.data.frame(cm_rf$table), mapping = aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "green", high = "pink") +
+  theme_bw() + theme(legend.position = "none") +
+  ggtitle("RF confmat")
+
+
+grid.arrange(pcm_rpart, pcm_gbm, pcm_treebag, pcm_rf, #display model
+             nrow = 2,
+             ncol = 2)
+```
+It would seem all models except the first model (rpart) have very accurate confusion matrices. Thus Gradient Boost, Bagged Trees and Random Forest are all viable models for assessing prediction.
+
+### Model Statistics
+
+Gathers the stored model statistics from the predictions section and displays in a table for comparison.
+```{r}
+stat_mod <- rbind(stat_rpart, stat_gbm, stat_treebag, stat_rf) #gather model statistics
+stat_mod <- as.data.frame(stat_mod)
+stat_mod$model <- c("Basic CART", "Gradient Boosted", "Bagged Trees", "Random Forest")
+# stat_mod
+
+stat_mod <- arrange.vars(stat_mod, c("model" = 1,"Kappa" = 2 ,"AccuracyNull" = 3,"Accuracy" = 4, "AccuracyLower" = 5, "AccuracyUpper" = 6))
+
+kable(x = stat_mod,  #generate table
+      format = "html",
+      digits = 3,
+      row.names = FALSE,
+      align = 'c',
+      col.names = c("Model", "K", "Naive Acc.", "Model Acc.", "CI-lo", "CI-hi"),
+      table.attr = "style = \"color: black;\"",
+      caption = "Table 3. Comparison of Model Statistics") %>%
+  kable_styling(bootstrap_options = c('striped'),
+                full_width = FALSE)
+```
+With the exception of basic CART method, the other three methods all provided high accuracy >97% range. In addition, they had high magnitude kappa values indicating they very significant as compared to a naive model. From the model statistics, it would appear Random Forest had the highest accuracy and will thus be used for prediction on the final evaluation dataset.
+
+
+## TEST
+
+Final Prediction of Testing Dataset
+```{r}
+pred_fin <- predict(mod_rf, dataTest)
+print(pred_fin)
+```
+
+
+
+
+
+
+
+
+
+
+
